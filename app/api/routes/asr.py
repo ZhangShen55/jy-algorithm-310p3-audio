@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.api.deps import get_asr_service
-from app.core.errors import ASRProcessingError
+from app.core.errors import ASRProcessingError, ConcurrencyLimitError
 from app.schemas.asr import AsrResponse
 from app.services.asr_service import ASRService
 
@@ -38,9 +38,21 @@ async def seacraft_asr(
             show_emotion=showEmotion,
             language=language,
         )
+    except ConcurrencyLimitError as exc:
+        logger.warning("Concurrency limit exceeded. max_concurrent=%s", exc.details)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=exc.message,
+        ) from exc
     except ASRProcessingError as exc:
         logger.exception("ASR processing failed. details=%s", exc.details)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=exc.message,
         ) from exc
+
+
+@router.get("/get_status", status_code=status.HTTP_200_OK)
+async def get_status(asr_service: ASRService = Depends(get_asr_service)) -> dict:
+    """获取 ASR 服务状态，包括成功/失败数量、正在处理和排队的任务"""
+    return await asr_service.get_status()

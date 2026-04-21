@@ -20,12 +20,16 @@ backup_count = 10
 tmp_dir = "./tmp_audio"
 chunk_size = 1048576
 
+[asr]
+max_concurrent_requests = 20
+max_queue_size = 10
+
 [asr.paraformer]
 executable = "./bin/sherpa-onnx-vad-with-offline-asr"
 working_dir = "/root/workspaces/zhangs/jy-algorithm-app-asr-npu/sherpa-onnx/build"
 provider = "ascend"
 silero_vad_model = "./vad/silero_vad.onnx"
-silero_vad_threshold = 0.35
+silero_vad_threshold = 0.25
 silero_vad_min_silence_duration = 0.25
 paraformer = "sherpa-onnx-ascend-310P3-cann-8.2-paraformer-zh-2023-03-28/encoder.om,sherpa-onnx-ascend-310P3-cann-8.2-paraformer-zh-2023-03-28/predictor.om,sherpa-onnx-ascend-310P3-cann-8.2-paraformer-zh-2023-03-28/decoder.om"
 tokens = "sherpa-onnx-ascend-310P3-cann-8.2-paraformer-zh-2023-03-28/tokens.txt"
@@ -36,7 +40,7 @@ executable = "./bin/sherpa-onnx-vad-with-offline-asr"
 working_dir = "/root/workspaces/zhangs/jy-algorithm-app-asr-npu/sherpa-onnx/build"
 provider = "ascend"
 silero_vad_model = "./vad/silero_vad.onnx"
-silero_vad_threshold = 0.4
+silero_vad_threshold = 0.3
 silero_vad_min_silence_duration = 0.25
 sense_voice_model = "./sherpa-onnx-ascend-310P3-cann-8.2-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.om"
 tokens = "./sherpa-onnx-ascend-310P3-cann-8.2-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt"

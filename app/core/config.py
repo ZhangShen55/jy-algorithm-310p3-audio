@@ -65,6 +65,8 @@ class SenseVoiceCliSettings(BaseModel):
 class AsrPipelineSettings(BaseModel):
     paraformer: ParaformerCliSettings
     sensevoice: SenseVoiceCliSettings
+    max_concurrent_requests: int = 16
+    max_queue_size: int = 10
 
 
 class Settings(BaseModel):

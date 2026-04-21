@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -8,9 +9,21 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.deps import get_asr_service
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时
+    asr_service = get_asr_service()
+    await asr_service.start()
+    yield
+    # 关闭时
+    await asr_service.stop()
 
 
 def create_app() -> FastAPI:
@@ -20,6 +33,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app.name,
         version=settings.app.version,
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.include_router(api_router)

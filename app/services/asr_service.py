@@ -4,17 +4,17 @@ import asyncio
 import json
 import logging
 import shlex
-import wave
-from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import UploadFile
 
 from app.core.config import ParaformerCliSettings, SenseVoiceCliSettings, Settings
-from app.core.errors import ASRProcessingError
+from app.core.errors import ASRProcessingError, ConcurrencyLimitError
 from app.schemas.asr import AsrResponse, Segment
 
 
@@ -23,6 +23,18 @@ class TimelineSegment:
     start: float
     end: float
     text: str
+    emotion: str | None = None
+
+
+@dataclass
+class TaskInfo:
+    task_id: str
+    filename: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
 
 
 class ASRService:
@@ -32,6 +44,35 @@ class ASRService:
         self._tmp_dir = Path(settings.storage.tmp_dir).expanduser().resolve()
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        # 并发控制
+        self._semaphore = asyncio.Semaphore(settings.asr.max_concurrent_requests)
+        self._queue: asyncio.Queue[tuple[str, asyncio.Event]] = asyncio.Queue(maxsize=settings.asr.max_queue_size)
+
+        # 状态跟踪
+        self._tasks: dict[str, TaskInfo] = {}
+        self._tasks_lock = asyncio.Lock()
+        self._success_count = 0
+        self._failure_count = 0
+
+        # 队列处理器任务（延迟启动）
+        self._queue_processor_task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        """启动后台队列处理任务"""
+        if self._queue_processor_task is None:
+            self._queue_processor_task = asyncio.create_task(self._process_queue())
+            self._logger.info("Queue processor started")
+
+    async def stop(self) -> None:
+        """停止后台队列处理任务"""
+        if self._queue_processor_task is not None:
+            self._queue_processor_task.cancel()
+            try:
+                await self._queue_processor_task
+            except asyncio.CancelledError:
+                pass
+            self._logger.info("Queue processor stopped")
+
     async def transcribe(
         self,
         *,
@@ -39,56 +80,181 @@ class ASRService:
         show_emotion: bool,
         language: str | None,
     ) -> AsrResponse:
-        temp_audio_path = self._build_temp_path(upload_file.filename)
-        normalized_language = self._normalize_language(language)
+        task_id = uuid4().hex
 
-        try:
-            load_start = perf_counter()
-            await self._save_upload_file(upload_file, temp_audio_path)
-            load_audio_time_ms = (perf_counter() - load_start) * 1000
+        # 尝试立即获取信号量（非阻塞）
+        acquired = False
+        if self._semaphore._value > 0:
+            try:
+                # 使用wait_for实现非阻塞尝试
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=0.001)
+                acquired = True
+            except asyncio.TimeoutError:
+                acquired = False
 
-            self._logger.info(
-                "Audio upload saved. source_name=%s temp_path=%s size_bytes=%s",
-                upload_file.filename,
-                temp_audio_path,
-                temp_audio_path.stat().st_size if temp_audio_path.exists() else -1,
-            )
+        if not acquired:
+            # 没有可用槽位，尝试加入队列（需要原子性检查和加入）
+            try:
+                # 使用put_nowait确保原子性，如果队列满会立即抛出QueueFull异常
+                event = asyncio.Event()
 
-            gpu_start = perf_counter()
-            timeline_segments = await self._run_paraformer(temp_audio_path)
-            segment_emotions = await self._extract_emotions(
-                audio_path=temp_audio_path,
-                timeline_segments=timeline_segments,
-                show_emotion=show_emotion,
-                language=normalized_language,
-            )
-            gpu_time_ms = (perf_counter() - gpu_start) * 1000
+                # 必须在锁内完成队列检查和入队，避免竞态条件
+                async with self._tasks_lock:
+                    # 先尝试入队（原子操作）
+                    self._queue.put_nowait((task_id, event))
 
-            response_segments: list[Segment] = []
-            merged_text_parts: list[str] = []
-            for idx, timeline in enumerate(timeline_segments):
-                duration = max(0.0, timeline.end - timeline.start)
-                response_segments.append(
-                    Segment(
-                        segment_text=timeline.text,
-                        bg=f"{timeline.start:.2f}",
-                        ed=f"{timeline.end:.2f}",
-                        speed=self._calc_speed(timeline.text, duration),
-                        role=None,
-                        emotion=segment_emotions[idx],
+                    # 入队成功后再创建task记录
+                    self._tasks[task_id] = TaskInfo(
+                        task_id=task_id,
+                        filename=upload_file.filename or "unknown",
+                        status="queued",
+                        created_at=datetime.now(),
                     )
-                )
-                merged_text_parts.append(timeline.text)
 
-            return AsrResponse(
-                language=normalized_language or "auto",
-                segments=response_segments,
-                text="".join(merged_text_parts),
-                load_audio_time_ms=f"{load_audio_time_ms:.2f}",
-                gpu_time_ms=f"{gpu_time_ms:.2f}",
-            )
+                self._logger.info("Task %s queued. filename=%s", task_id, upload_file.filename)
+
+                # 等待轮到自己
+                await event.wait()
+
+                # 获取信号量
+                await self._semaphore.acquire()
+            except asyncio.QueueFull:
+                # 队列已满，清理已创建的task记录
+                async with self._tasks_lock:
+                    self._tasks.pop(task_id, None)
+
+                raise ConcurrencyLimitError(
+                    message="Server is busy and queue is full. Please try again later.",
+                    details={
+                        "max_concurrent": self._settings.asr.max_concurrent_requests,
+                        "max_queue_size": self._settings.asr.max_queue_size,
+                    },
+                )
+
+        # 更新状态为处理中
+        async with self._tasks_lock:
+            if task_id in self._tasks:
+                self._tasks[task_id].status = "processing"
+                self._tasks[task_id].started_at = datetime.now()
+            else:
+                self._tasks[task_id] = TaskInfo(
+                    task_id=task_id,
+                    filename=upload_file.filename or "unknown",
+                    status="processing",
+                    created_at=datetime.now(),
+                    started_at=datetime.now(),
+                )
+
+        temp_audio_path: Path | None = None
+        try:
+            temp_audio_path = self._build_temp_path(upload_file.filename)
+            normalized_language = self._normalize_language(language)
+
+            try:
+                load_start = perf_counter()
+                await self._save_upload_file(upload_file, temp_audio_path)
+                load_audio_time_ms = (perf_counter() - load_start) * 1000
+
+                self._logger.info(
+                    "Audio upload saved. task_id=%s source_name=%s temp_path=%s size_bytes=%s",
+                    task_id,
+                    upload_file.filename,
+                    temp_audio_path,
+                    temp_audio_path.stat().st_size if temp_audio_path.exists() else -1,
+                )
+
+                gpu_start = perf_counter()
+
+                if show_emotion:
+                    timeline_segments = await self._run_sensevoice(temp_audio_path, normalized_language)
+                else:
+                    timeline_segments = await self._run_paraformer(temp_audio_path)
+
+                gpu_time_ms = (perf_counter() - gpu_start) * 1000
+
+                response_segments: list[Segment] = []
+                merged_text_parts: list[str] = []
+                for timeline in timeline_segments:
+                    duration = max(0.0, timeline.end - timeline.start)
+                    response_segments.append(
+                        Segment(
+                            segment_text=timeline.text,
+                            bg=f"{timeline.start:.2f}",
+                            ed=f"{timeline.end:.2f}",
+                            speed=self._calc_speed(timeline.text, duration),
+                            role=None,
+                            emotion=timeline.emotion,
+                        )
+                    )
+                    merged_text_parts.append(timeline.text)
+
+                # 标记成功
+                async with self._tasks_lock:
+                    if task_id in self._tasks:
+                        self._tasks[task_id].status = "completed"
+                        self._tasks[task_id].completed_at = datetime.now()
+                    self._success_count += 1
+
+                return AsrResponse(
+                    language=normalized_language or "auto",
+                    segments=response_segments,
+                    text="".join(merged_text_parts),
+                    load_audio_time_ms=f"{load_audio_time_ms:.2f}",
+                    gpu_time_ms=f"{gpu_time_ms:.2f}",
+                )
+            except Exception as e:
+                # 标记失败
+                async with self._tasks_lock:
+                    if task_id in self._tasks:
+                        self._tasks[task_id].status = "failed"
+                        self._tasks[task_id].completed_at = datetime.now()
+                        self._tasks[task_id].error = str(e)
+                    self._failure_count += 1
+                raise
+            finally:
+                # 确保删除临时文件
+                if temp_audio_path is not None:
+                    await self._delete_temp_file(temp_audio_path)
         finally:
-            await self._delete_temp_file(temp_audio_path)
+            self._semaphore.release()
+
+    async def _process_queue(self) -> None:
+        """后台任务：处理等待队列"""
+        while True:
+            try:
+                task_id, event = await self._queue.get()
+                self._logger.info("Processing queued task %s", task_id)
+                event.set()  # 通知任务可以开始处理
+                self._queue.task_done()
+            except Exception as e:
+                self._logger.error("Queue processor error: %s", e)
+                await asyncio.sleep(1)
+
+    async def get_status(self) -> dict:
+        """获取服务状态"""
+        async with self._tasks_lock:
+            processing_tasks = [
+                {"task_id": t.task_id, "filename": t.filename, "started_at": t.started_at.isoformat()}
+                for t in self._tasks.values()
+                if t.status == "processing"
+            ]
+            queued_tasks = [
+                {"task_id": t.task_id, "filename": t.filename, "created_at": t.created_at.isoformat()}
+                for t in self._tasks.values()
+                if t.status == "queued"
+            ]
+
+            return {
+                "success_count": self._success_count,
+                "failure_count": self._failure_count,
+                "processing_count": len(processing_tasks),
+                "queued_count": len(queued_tasks),
+                "max_concurrent": self._settings.asr.max_concurrent_requests,
+                "max_queue_size": self._settings.asr.max_queue_size,
+                "available_slots": self._semaphore._value,
+                "processing_tasks": processing_tasks,
+                "queued_tasks": queued_tasks,
+            }
 
     async def _run_paraformer(self, audio_path: Path) -> list[TimelineSegment]:
         paraformer_config = self._settings.asr.paraformer
@@ -101,108 +267,16 @@ class ASRService:
         )
         return self._parse_paraformer_segments(stdout_text)
 
-    async def _extract_emotions(
-        self,
-        *,
-        audio_path: Path,
-        timeline_segments: list[TimelineSegment],
-        show_emotion: bool,
-        language: str | None,
-    ) -> list[str | None]:
-        if not timeline_segments:
-            return []
-
-        if not show_emotion:
-            return [None] * len(timeline_segments)
-
-        split_dir, chunk_paths = self._split_audio_by_segments(audio_path, timeline_segments)
-        emotions: list[str | None] = []
-
-        try:
-            for index, chunk_path in enumerate(chunk_paths):
-                emotion = await self._run_sensevoice_for_chunk(chunk_path, language, index)
-                emotions.append(emotion)
-        finally:
-            for chunk_path in chunk_paths:
-                await self._delete_temp_file(chunk_path)
-            await self._delete_temp_dir(split_dir)
-
-        return emotions
-
-    async def _run_sensevoice_for_chunk(self, chunk_path: Path, language: str | None, index: int) -> str | None:
+    async def _run_sensevoice(self, audio_path: Path, language: str | None) -> list[TimelineSegment]:
         sensevoice_config = self._settings.asr.sensevoice
-        command = self._build_sensevoice_command(chunk_path, language, sensevoice_config)
-
-        try:
-            stdout_text = await self._run_command(
-                command=command,
-                timeout_seconds=sensevoice_config.command_timeout_seconds,
-                working_dir=sensevoice_config.working_dir,
-                command_label=f"sensevoice[{index}]",
-            )
-        except ASRProcessingError as exc:
-            self._logger.warning(
-                "SenseVoice emotion extraction failed for chunk index=%s path=%s details=%s",
-                index,
-                chunk_path,
-                exc.details,
-            )
-            return None
-
-        return self._parse_emotion(stdout_text)
-
-    def _split_audio_by_segments(
-        self,
-        audio_path: Path,
-        timeline_segments: list[TimelineSegment],
-    ) -> tuple[Path, list[Path]]:
-        split_dir = self._tmp_dir / f"split_{uuid4().hex}"
-        split_dir.mkdir(parents=True, exist_ok=True)
-        chunk_paths: list[Path] = []
-
-        try:
-            with wave.open(str(audio_path), "rb") as source:
-                total_frames = source.getnframes()
-                frame_rate = source.getframerate()
-                channels = source.getnchannels()
-                sample_width = source.getsampwidth()
-
-                if frame_rate <= 0:
-                    raise ASRProcessingError("Invalid audio frame rate.")
-
-                for index, seg in enumerate(timeline_segments):
-                    start_frame = int(max(0.0, seg.start) * frame_rate)
-                    end_frame = int(max(seg.start, seg.end) * frame_rate)
-
-                    if total_frames > 0:
-                        start_frame = min(start_frame, total_frames - 1)
-                        end_frame = min(end_frame, total_frames)
-                        if end_frame <= start_frame:
-                            end_frame = min(total_frames, start_frame + 1)
-                    else:
-                        start_frame = 0
-                        end_frame = 0
-
-                    frame_count = max(0, end_frame - start_frame)
-                    source.setpos(start_frame)
-                    frames = source.readframes(frame_count)
-
-                    chunk_path = split_dir / f"chunk_{index:06d}.wav"
-                    with wave.open(str(chunk_path), "wb") as chunk:
-                        chunk.setnchannels(channels)
-                        chunk.setsampwidth(sample_width)
-                        chunk.setframerate(frame_rate)
-                        chunk.writeframes(frames)
-
-                    chunk_paths.append(chunk_path)
-        except wave.Error as exc:
-            raise ASRProcessingError(
-                "Failed to split audio by paraformer timestamps. Ensure uploaded audio is PCM WAV.",
-                details=str(exc),
-            ) from exc
-
-        self._logger.info("Audio split finished. chunk_count=%s split_dir=%s", len(chunk_paths), split_dir)
-        return split_dir, chunk_paths
+        command = self._build_sensevoice_command(audio_path, language, sensevoice_config)
+        stdout_text = await self._run_command(
+            command=command,
+            timeout_seconds=sensevoice_config.command_timeout_seconds,
+            working_dir=sensevoice_config.working_dir,
+            command_label="sensevoice",
+        )
+        return self._parse_sensevoice_segments(stdout_text)
 
     async def _run_command(
         self,
@@ -309,7 +383,7 @@ class ASRService:
             if end < start:
                 end = start
 
-            segments.append(TimelineSegment(start=start, end=end, text=text))
+            segments.append(TimelineSegment(start=start, end=end, text=text, emotion=None))
 
         if not segments:
             raise ASRProcessingError(
@@ -319,23 +393,37 @@ class ASRService:
 
         return segments
 
-    def _parse_emotion(self, stdout_text: str) -> str | None:
-        emotions: list[str] = []
+    def _parse_sensevoice_segments(self, stdout_text: str) -> list[TimelineSegment]:
+        segments: list[TimelineSegment] = []
 
         for line in stdout_text.splitlines():
             parsed = self._parse_json_line(line)
             if parsed is None:
                 continue
 
-            raw_emotion = parsed.get("emotion")
-            emotion = str(raw_emotion).strip() if raw_emotion is not None else ""
-            if emotion:
-                emotions.append(emotion)
+            text = str(parsed.get("text", "")).strip()
+            if not text:
+                self._logger.warning("SenseVoice segment has empty text field. Raw data: %s", parsed)
+                continue
 
-        if not emotions:
-            return None
+            start = self._to_float(parsed.get("start"))
+            end = self._to_float(parsed.get("end"))
+            if end < start:
+                end = start
 
-        return Counter(emotions).most_common(1)[0][0]
+            emotion_raw = parsed.get("emotion")
+            emotion_str = self._map_emotion(str(emotion_raw).strip()) if emotion_raw is not None else None
+
+            self._logger.debug("Parsed SenseVoice segment: text=%s, emotion=%s->%s, start=%s, end=%s", text, emotion_raw, emotion_str, start, end)
+            segments.append(TimelineSegment(start=start, end=end, text=text, emotion=emotion_str))
+
+        if not segments:
+            raise ASRProcessingError(
+                "SenseVoice command succeeded but no valid segments were produced.",
+                details=self._tail_text(stdout_text),
+            )
+
+        return segments
 
     async def _save_upload_file(self, upload_file: UploadFile, target_path: Path) -> None:
         chunk_size = self._settings.storage.chunk_size
@@ -383,6 +471,23 @@ class ASRService:
         characters = len(text)
         speed = (characters * 60) / duration_sec
         return int(round(speed))
+
+    _EMOTION_MAP: dict[str, str] = {
+        "HAPPY": "积极",
+        "SAD": "思考",
+        "ANGRY": "强调",
+        "NEUTRAL": "平淡",
+        "FEAR": "疑问",
+        "DISGUST": "平淡",
+        "SURPRISE": "兴奋",
+        "EMO_UNKNOWN": "平淡",
+    }
+
+    @classmethod
+    def _map_emotion(cls, raw: str) -> str:
+        """将SenseVoice情感标签映射为中文标签，支持 <|HAPPY|> 和 HAPPY 两种格式"""
+        tag = raw.strip("<|> ").upper()
+        return cls._EMOTION_MAP.get(tag, "平淡")
 
     @staticmethod
     def _normalize_language(language: str | None) -> str | None:
