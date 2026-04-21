@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import shlex
+import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -79,8 +80,18 @@ class ASRService:
         upload_file: UploadFile,
         show_emotion: bool,
         language: str | None,
+        open_punc: bool,
     ) -> AsrResponse:
         task_id = uuid4().hex
+
+        self._logger.info(
+            "ASR request received. task_id=%s filename=%s show_emotion=%s language=%s open_punc=%s",
+            task_id,
+            upload_file.filename,
+            show_emotion,
+            language,
+            open_punc,
+        )
 
         # 尝试立即获取信号量（非阻塞）
         acquired = False
@@ -89,6 +100,7 @@ class ASRService:
                 # 使用wait_for实现非阻塞尝试
                 await asyncio.wait_for(self._semaphore.acquire(), timeout=0.001)
                 acquired = True
+                self._logger.info("ASR task acquired processing slot. task_id=%s", task_id)
             except asyncio.TimeoutError:
                 acquired = False
 
@@ -111,10 +123,12 @@ class ASRService:
                         created_at=datetime.now(),
                     )
 
-                self._logger.info("Task %s queued. filename=%s", task_id, upload_file.filename)
+                self._logger.info("ASR task queued. task_id=%s filename=%s queue_position=%d", task_id, upload_file.filename, self._queue.qsize())
 
                 # 等待轮到自己
                 await event.wait()
+
+                self._logger.info("ASR task dequeued, starting processing. task_id=%s", task_id)
 
                 # 获取信号量
                 await self._semaphore.acquire()
@@ -146,6 +160,7 @@ class ASRService:
                 )
 
         temp_audio_path: Path | None = None
+        request_start = perf_counter()
         try:
             temp_audio_path = self._build_temp_path(upload_file.filename)
             normalized_language = self._normalize_language(language)
@@ -163,6 +178,17 @@ class ASRService:
                     temp_audio_path.stat().st_size if temp_audio_path.exists() else -1,
                 )
 
+                # 校验音频时长
+                try:
+                    with wave.open(str(temp_audio_path), 'rb') as wf:
+                        frames = wf.getnframes()
+                        rate = wf.getframerate()
+                        duration = frames / float(rate)
+                        if duration < 1.0:
+                            raise ASRProcessingError(f"音频时长过短: {duration:.2f}秒，要求至少1秒")
+                except wave.Error as e:
+                    raise ASRProcessingError(f"无效的音频文件格式: {e}")
+
                 gpu_start = perf_counter()
 
                 if show_emotion:
@@ -171,6 +197,15 @@ class ASRService:
                     timeline_segments = await self._run_paraformer(temp_audio_path)
 
                 gpu_time_ms = (perf_counter() - gpu_start) * 1000
+
+                self._logger.info(
+                    "ASR processing completed. task_id=%s filename=%s load_time_ms=%.2f gpu_time_ms=%.2f segments=%d",
+                    task_id,
+                    upload_file.filename,
+                    load_audio_time_ms,
+                    gpu_time_ms,
+                    len(timeline_segments),
+                )
 
                 response_segments: list[Segment] = []
                 merged_text_parts: list[str] = []
@@ -188,6 +223,18 @@ class ASRService:
                     )
                     merged_text_parts.append(timeline.text)
 
+                # 标点恢复
+                merged_text = "".join(merged_text_parts)
+                if open_punc and merged_text.strip():
+                    punc_start = perf_counter()
+                    merged_text = await self._restore_punctuation(merged_text)
+                    punc_time_ms = (perf_counter() - punc_start) * 1000
+                    self._logger.info(
+                        "Punctuation restoration completed. task_id=%s punc_time_ms=%.2f",
+                        task_id,
+                        punc_time_ms,
+                    )
+
                 # 标记成功
                 async with self._tasks_lock:
                     if task_id in self._tasks:
@@ -195,10 +242,19 @@ class ASRService:
                         self._tasks[task_id].completed_at = datetime.now()
                     self._success_count += 1
 
+                total_time_ms = (perf_counter() - request_start) * 1000
+                self._logger.info(
+                    "ASR request completed successfully. task_id=%s filename=%s total_time_ms=%.2f segments=%d",
+                    task_id,
+                    upload_file.filename,
+                    total_time_ms,
+                    len(response_segments),
+                )
+
                 return AsrResponse(
                     language=normalized_language or "auto",
                     segments=response_segments,
-                    text="".join(merged_text_parts),
+                    text=merged_text,
                     load_audio_time_ms=f"{load_audio_time_ms:.2f}",
                     gpu_time_ms=f"{gpu_time_ms:.2f}",
                 )
@@ -210,6 +266,14 @@ class ASRService:
                         self._tasks[task_id].completed_at = datetime.now()
                         self._tasks[task_id].error = str(e)
                     self._failure_count += 1
+
+                self._logger.error(
+                    "ASR request failed. task_id=%s filename=%s error=%s",
+                    task_id,
+                    upload_file.filename,
+                    str(e),
+                    exc_info=True,
+                )
                 raise
             finally:
                 # 确保删除临时文件
@@ -474,20 +538,64 @@ class ASRService:
 
     _EMOTION_MAP: dict[str, str] = {
         "HAPPY": "积极",
-        "SAD": "思考",
+        "SAD": "平淡",
         "ANGRY": "强调",
         "NEUTRAL": "平淡",
-        "FEAR": "疑问",
-        "DISGUST": "平淡",
-        "SURPRISE": "兴奋",
-        "EMO_UNKNOWN": "平淡",
+        "FEARFUL": "思考",
+        "DISGUSTED": "疑问",
+        "SURPRISED": "兴奋",
     }
 
-    @classmethod
-    def _map_emotion(cls, raw: str) -> str:
-        """将SenseVoice情感标签映射为中文标签，支持 <|HAPPY|> 和 HAPPY 两种格式"""
-        tag = raw.strip("<|> ").upper()
-        return cls._EMOTION_MAP.get(tag, "平淡")
+    @staticmethod
+    def _map_emotion(raw_emotion: str) -> str | None:
+        """将 SenseVoice 的情感标签映射为教学场景标签"""
+        if not raw_emotion:
+            return None
+        return ASRService._EMOTION_MAP.get(raw_emotion.upper())
+
+    async def _restore_punctuation(self, text: str) -> str:
+        """使用 sherpa-onnx-offline-punctuation 为文本添加标点"""
+        config = self._settings.punctuation_cli
+
+        command = [
+            config.executable,
+            f"--ct-transformer={config.ct_transformer}",
+            text,
+        ]
+
+        self._logger.debug("Running punctuation command: %s", " ".join(command))
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=config.working_dir,
+            )
+            stdout_bytes, stderr_bytes = await process.communicate()
+
+            if process.returncode != 0:
+                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+                raise ASRProcessingError(
+                    f"Punctuation restoration failed with exit code {process.returncode}",
+                    details=self._tail_text(stderr_text),
+                )
+
+            result = stdout_bytes.decode("utf-8", errors="replace").strip()
+            if not result:
+                self._logger.warning("Punctuation restoration returned empty result, using original text")
+                return text
+
+            return result
+
+        except FileNotFoundError as exc:
+            raise ASRProcessingError(
+                f"Punctuation CLI executable not found: {config.executable}"
+            ) from exc
+        except Exception as exc:
+            self._logger.error("Punctuation restoration failed: %s", exc)
+            # 标点恢复失败时返回原文本，不中断整个流程
+            return text
 
     @staticmethod
     def _normalize_language(language: str | None) -> str | None:

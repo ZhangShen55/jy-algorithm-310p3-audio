@@ -24,6 +24,7 @@ async def seacraft_asr(
     showSpk: bool = Form(default=False),
     showEmotion: bool = Form(default=True),
     language: str | None = Form(default=None),
+    openPunc: bool = Form(default=True),
     asr_service: ASRService = Depends(get_asr_service),
 ) -> AsrResponse:
     if showSpk:
@@ -37,6 +38,7 @@ async def seacraft_asr(
             upload_file=audioFile,
             show_emotion=showEmotion,
             language=language,
+            open_punc=openPunc,
         )
     except ConcurrencyLimitError as exc:
         logger.warning("Concurrency limit exceeded. max_concurrent=%s", exc.details)

@@ -62,6 +62,12 @@ class SenseVoiceCliSettings(BaseModel):
     command_timeout_seconds: int = 7200
 
 
+class PunctuationCliSettings(BaseModel):
+    executable: str
+    working_dir: str | None = None
+    ct_transformer: str
+
+
 class AsrPipelineSettings(BaseModel):
     paraformer: ParaformerCliSettings
     sensevoice: SenseVoiceCliSettings
@@ -75,6 +81,7 @@ class Settings(BaseModel):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     asr: AsrPipelineSettings
+    punctuation_cli: PunctuationCliSettings
 
 
 def _load_toml_file(config_path: Path) -> dict:
