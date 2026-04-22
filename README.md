@@ -73,7 +73,7 @@ APP_CONFIG_FILE=/path/to/config.toml python run.py
 3. 根据 `showEmotion` 选择一种 ASR：
    - `showEmotion=true` → 跑 **SenseVoice**，一次性拿到 `text + start + end + emotion`；
    - `showEmotion=false` → 跑 **Paraformer**，只拿 `text + start + end`，所有 segment 的 `emotion` 为 `null`。
-4. 计算每段语速：`speed = round(len(text) * 60 / duration_sec)`（字/分钟）。
+4. 计算每段语速：`speed = round(len(text) * 60 / duration_sec * 0.6)`（字/分钟，`0.6` 为经验校准系数，用于贴近真实感知语速）。
 5. 若 `openPunc=true`（默认），把所有 segment 文本拼接后丢给 **CT-Transformer** 标点模型，再用字符对齐算法把标点回填到各个 segment；标点 CLI 失败时自动回退为无标点文本，不影响整体结果。
 6. 情绪标签映射（见第 8 节）。
 7. 删除临时文件，释放信号量，返回响应。
@@ -116,7 +116,7 @@ APP_CONFIG_FILE=/path/to/config.toml python run.py
 字段说明：
 
 - `bg` / `ed`：开始/结束秒数，保留两位小数（字符串）
-- `speed`：字/分钟
+- `speed`：字/分钟（= `round(len(text) * 60 / duration_sec * 0.6)`，含 `0.6` 校准系数）
 - `role`：恒为 `null`，为后续说话人分离预留
 - `emotion`：教学场景中文标签或 `null`
 - `text`：所有 segment 的拼接文本，开启 `openPunc` 时为带标点版本

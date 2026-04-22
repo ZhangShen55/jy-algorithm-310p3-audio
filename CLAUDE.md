@@ -60,7 +60,7 @@ Despite the legacy name, the current pipeline is **not** a Paraformer → SenseV
 2. Save the upload to `tmp_audio/<uuid>.<ext>`.
 3. Validate the audio with the stdlib `wave` module (must be PCM WAV, duration ≥ 1.0s).
 4. Run **SenseVoice** *or* **Paraformer** (one shot, full audio).
-5. Build `Segment` objects and compute `speed = round(len(text) * 60 / duration_sec)` per segment.
+5. Build `Segment` objects and compute `speed = round(len(text) * 60 / duration_sec * 0.6)` per segment (the `0.6` calibration factor lives at `ASRService._SPEED_CALIBRATION_FACTOR` and scales the raw chars-per-minute down to match perceived speech rate).
 6. If `openPunc=true` and the merged text is non-empty: call the punctuation CLI and redistribute punctuation back onto segments.
 7. Map SenseVoice raw emotion tags to teaching-domain Chinese labels (see "Emotion mapping" below).
 8. Clean up the temporary audio file and release the semaphore.
@@ -135,7 +135,7 @@ Response (`AsrResponse`, `extra="forbid"`):
 - `language`: normalized input language, or `"auto"` if not provided
 - `segments[]`: `{segment_text, bg, ed, speed, role, emotion}`
   - `bg` / `ed` are seconds formatted to 2 decimals (strings)
-  - `speed` is characters per minute: `round(len(text) * 60 / duration_sec)`, `0` when duration ≤ 0
+  - `speed` is calibrated characters per minute: `round(len(text) * 60 / duration_sec * 0.6)`, `0` when duration ≤ 0. The `0.6` factor is `ASRService._SPEED_CALIBRATION_FACTOR`.
   - `role` is always `null` (reserved for diarization)
   - `emotion` is a mapped Chinese label or `null`
 - `text`: concatenated segment texts (punctuated if `openPunc=true`)

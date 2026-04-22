@@ -535,14 +535,16 @@ class ASRService:
         except (TypeError, ValueError):
             return 0.0
 
+    _SPEED_CALIBRATION_FACTOR: float = 0.6
+
     @staticmethod
     def _calc_speed(text: str, duration_sec: float) -> int:
         if duration_sec <= 0:
             return 0
 
         characters = len(text)
-        speed = (characters * 60) / duration_sec
-        return int(round(speed))
+        raw_speed = (characters * 60) / duration_sec
+        return int(round(raw_speed * ASRService._SPEED_CALIBRATION_FACTOR))
 
     _EMOTION_MAP: dict[str, str] = {
         "<|HAPPY|>": "积极",
