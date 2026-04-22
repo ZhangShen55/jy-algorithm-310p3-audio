@@ -235,6 +235,12 @@ class ASRService:
                         punc_time_ms,
                     )
 
+                    # 将标点分配回各个 segment
+                    response_segments = self._distribute_punctuation_to_segments(
+                        response_segments,
+                        merged_text
+                    )
+
                 # 标记成功
                 async with self._tasks_lock:
                     if task_id in self._tasks:
@@ -399,6 +405,7 @@ class ASRService:
         command = [
             config.executable,
             f"--provider={config.provider}",
+            f"--num-threads={config.num_threads}",
             f"--silero-vad-model={config.silero_vad_model}",
             f"--silero-vad-threshold={config.silero_vad_threshold}",
             f"--silero-vad-min-silence-duration={config.silero_vad_min_silence_duration}",
@@ -417,6 +424,7 @@ class ASRService:
         command = [
             config.executable,
             f"--provider={config.provider}",
+            f"--num-threads={config.num_threads}",
             f"--silero-vad-model={config.silero_vad_model}",
             f"--silero-vad-threshold={config.silero_vad_threshold}",
             f"--silero-vad-min-silence-duration={config.silero_vad_min_silence_duration}",
@@ -537,13 +545,13 @@ class ASRService:
         return int(round(speed))
 
     _EMOTION_MAP: dict[str, str] = {
-        "HAPPY": "积极",
-        "SAD": "平淡",
-        "ANGRY": "强调",
-        "NEUTRAL": "平淡",
-        "FEARFUL": "思考",
-        "DISGUSTED": "疑问",
-        "SURPRISED": "兴奋",
+        "<|HAPPY|>": "积极",
+        "<|SAD|>": "平淡",
+        "<|ANGRY|>": "强调",
+        "<|NEUTRAL|>": "平淡",
+        "<|FEARFUL|>": "思考",
+        "<|DISGUSTED|>": "疑问",
+        "<|SURPRISED|>": "兴奋",
     }
 
     @staticmethod
@@ -552,6 +560,96 @@ class ASRService:
         if not raw_emotion:
             return None
         return ASRService._EMOTION_MAP.get(raw_emotion.upper())
+
+    def _distribute_punctuation_to_segments(
+        self,
+        segments: list[Segment],
+        punctuated_text: str
+    ) -> list[Segment]:
+        """将标点分配回各个 segment
+
+        策略：
+        1. 先构建字符到 segment 的映射（每个非标点字符属于哪个 segment）
+        2. 遍历 punctuated_text，将标点添加到前一个非标点字符所属的 segment
+
+        Args:
+            segments: 原始的 segment 列表（无标点）
+            punctuated_text: 带标点的完整文本
+
+        Returns:
+            更新后的 segment 列表（segment_text 中包含标点）
+        """
+        if not segments or not punctuated_text:
+            return segments
+
+        # 定义标点符号集合
+        punctuation_chars = set('，。！？；：、""''（）【】《》…—,.!?;:\'"()[]<>-')
+
+        # 复制 segments，清空 segment_text，稍后重新构建
+        result_segments = [
+            Segment(
+                segment_text="",
+                bg=seg.bg,
+                ed=seg.ed,
+                speed=seg.speed,
+                role=seg.role,
+                emotion=seg.emotion,
+            )
+            for seg in segments
+        ]
+
+        # 构建原始文本（无标点）
+        original_text = "".join(seg.segment_text for seg in segments)
+
+        # 构建字符索引到 segment 索引的映射
+        char_to_seg = []  # [(char, seg_idx), ...]
+        for seg_idx, seg in enumerate(segments):
+            for char in seg.segment_text:
+                char_to_seg.append((char, seg_idx))
+
+        # 遍历 punctuated_text，分配字符和标点
+        orig_idx = 0  # 原始文本的索引
+        last_seg_idx = -1  # 最后一个非标点字符所属的 segment
+
+        for text_char in punctuated_text:
+            if text_char in punctuation_chars:
+                # 标点：添加到最后一个非标点字符所属的 segment
+                if last_seg_idx >= 0:
+                    result_segments[last_seg_idx].segment_text += text_char
+            else:
+                # 非标点字符：匹配原始文本
+                if orig_idx < len(char_to_seg):
+                    orig_char, seg_idx = char_to_seg[orig_idx]
+                    if orig_char == text_char:
+                        # 匹配成功
+                        result_segments[seg_idx].segment_text += text_char
+                        last_seg_idx = seg_idx
+                        orig_idx += 1
+                    else:
+                        # 不匹配，尝试在接下来的字符中查找匹配
+                        found = False
+                        # 向前查找最多10个字符
+                        for skip in range(1, min(11, len(char_to_seg) - orig_idx)):
+                            if char_to_seg[orig_idx + skip][0] == text_char:
+                                # 找到匹配，跳过中间的字符
+                                orig_idx += skip
+                                orig_char, seg_idx = char_to_seg[orig_idx]
+                                result_segments[seg_idx].segment_text += text_char
+                                last_seg_idx = seg_idx
+                                orig_idx += 1
+                                found = True
+                                break
+
+                        if not found:
+                            # 仍然找不到，跳过这个字符（来自标点恢复的额外字符）
+                            pass
+
+        self._logger.debug(
+            "Distributed punctuation to %d segments",
+            len(result_segments)
+        )
+
+        return result_segments
 
     async def _restore_punctuation(self, text: str) -> str:
         """使用 sherpa-onnx-offline-punctuation 为文本添加标点"""

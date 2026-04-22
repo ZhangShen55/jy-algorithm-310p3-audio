@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 async def seacraft_asr(
     audioFile: UploadFile = File(...),
     showSpk: bool = Form(default=False),
-    showEmotion: bool = Form(default=True),
+    showEmotion: bool = Form(default=False),
     language: str | None = Form(default=None),
     openPunc: bool = Form(default=True),
     asr_service: ASRService = Depends(get_asr_service),

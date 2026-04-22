@@ -42,6 +42,7 @@ class ParaformerCliSettings(BaseModel):
     executable: str
     working_dir: str | None = None
     provider: str = "ascend"
+    num_threads: int = 2
     silero_vad_model: str
     silero_vad_threshold: float = 0.35
     silero_vad_min_silence_duration: float = 0.25
@@ -54,6 +55,7 @@ class SenseVoiceCliSettings(BaseModel):
     executable: str
     working_dir: str | None = None
     provider: str = "ascend"
+    num_threads: int = 2
     silero_vad_model: str
     silero_vad_threshold: float = 0.4
     silero_vad_min_silence_duration: float = 0.25
