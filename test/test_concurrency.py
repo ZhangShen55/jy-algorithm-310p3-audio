@@ -16,6 +16,7 @@ async def send_request(session: aiohttp.ClientSession, request_id: int, audio_fi
             file_content = f.read()
         data.add_field('audioFile', file_content, filename=audio_file.name, content_type='audio/wav')
         data.add_field('showEmotion', 'false')
+        data.add_field('openPunc', 'true')
 
         start_time = time.time()
         async with session.post(url, data=data) as response:
@@ -98,7 +99,7 @@ async def main():
         return
 
     # 测试1: 发送20个并发请求（超过16的限制）
-    await test_concurrency(60, audio_file)
+    await test_concurrency(1, audio_file)
 
 
 if __name__ == "__main__":

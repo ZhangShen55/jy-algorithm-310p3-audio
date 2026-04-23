@@ -9,3 +9,5 @@ venv/
 logs/
 tmp_audio/
 *.wav
+*.log
+/zimu/
