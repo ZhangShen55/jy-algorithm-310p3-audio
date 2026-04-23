@@ -99,7 +99,7 @@ SenseVoice emits raw English emotion labels. `ASRService._EMOTION_MAP` rewrites 
 | `DISGUSTED` | `疑问` |
 | `SURPRISED` | `兴奋` |
 
-Unknown labels become `null`.
+Unknown labels become `null` at mapping time, but when `showEmotion=true` the service performs a final pass that replaces any `null` emotion with `ASRService._DEFAULT_EMOTION` (`"平淡"`) so every returned segment always carries a non-empty `emotion` field. The backfill is a no-op when `showEmotion=false`.
 
 ### Punctuation Redistribution
 
@@ -137,7 +137,7 @@ Response (`AsrResponse`, `extra="forbid"`):
   - `bg` / `ed` are seconds formatted to 2 decimals (strings)
   - `speed` is calibrated characters per minute: `round(len(text) * 60 / duration_sec * 0.6)`, `0` when duration ≤ 0. The `0.6` factor is `ASRService._SPEED_CALIBRATION_FACTOR`.
   - `role` is always `null` (reserved for diarization)
-  - `emotion` is a mapped Chinese label or `null`
+  - `emotion` is a mapped Chinese label. When `showEmotion=true`, every segment is guaranteed to carry this field — any segment that lacks a mapped tag is backfilled with `ASRService._DEFAULT_EMOTION` (`"平淡"`). When `showEmotion=false` it stays `null`.
 - `text`: concatenated segment texts (punctuated if `openPunc=true`)
 - `load_audio_time_ms` / `gpu_time_ms`: timing strings formatted to 2 decimals
 

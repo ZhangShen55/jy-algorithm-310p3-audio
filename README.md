@@ -118,7 +118,7 @@ APP_CONFIG_FILE=/path/to/config.toml python run.py
 - `bg` / `ed`：开始/结束秒数，保留两位小数（字符串）
 - `speed`：字/分钟（= `round(len(text) * 60 / duration_sec * 0.6)`，含 `0.6` 校准系数）
 - `role`：恒为 `null`，为后续说话人分离预留
-- `emotion`：教学场景中文标签或 `null`
+- `emotion`：教学场景中文标签。`showEmotion=true` 时保证每个 segment 都有该字段（未命中映射表或为空时兜底为 `平淡`）；`showEmotion=false` 时为 `null`
 - `text`：所有 segment 的拼接文本，开启 `openPunc` 时为带标点版本
 
 错误码：

@@ -241,6 +241,12 @@ class ASRService:
                         merged_text
                     )
 
+                # 开启情绪识别时，保证每个 segment 都有 emotion 字段（兜底为"平淡"）
+                if show_emotion:
+                    for seg in response_segments:
+                        if not seg.emotion:
+                            seg.emotion = self._DEFAULT_EMOTION
+
                 # 标记成功
                 async with self._tasks_lock:
                     if task_id in self._tasks:
@@ -555,6 +561,8 @@ class ASRService:
         "<|DISGUSTED|>": "疑问",
         "<|SURPRISED|>": "兴奋",
     }
+
+    _DEFAULT_EMOTION: str = "平淡"
 
     @staticmethod
     def _map_emotion(raw_emotion: str) -> str | None:
