@@ -159,7 +159,7 @@ SenseVoice 原始输出为英文标签，服务内做了一次教学语义重写
 | `DISGUSTED` | `疑问` |
 | `SURPRISED` | `兴奋` |
 
-未覆盖的标签被置为 `null`。
+未覆盖的标签：当 `showEmotion=true` 时兜底为 `平淡`，保证字段存在；当 `showEmotion=false`（走 Paraformer）时整体为 `null`。
 
 ## 9. 并发与队列
 
