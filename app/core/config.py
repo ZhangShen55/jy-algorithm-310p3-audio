@@ -91,10 +91,20 @@ def _load_toml_file(config_path: Path) -> dict:
         return tomllib.load(handle)
 
 
+def resolved_config_path(config_file: str | None = None) -> Path:
+    """与 get_settings 使用相同的规则定位 config.toml（绝对路径）。"""
+    raw_path = config_file or os.environ.get("APP_CONFIG_FILE", "config.toml")
+    return Path(raw_path).expanduser().resolve()
+
+
+def resolved_config_dir(config_file: str | None = None) -> Path:
+    """config.toml 所在目录；CLI 的相对 working_dir 以此为基准解析。"""
+    return resolved_config_path(config_file).parent
+
+
 @lru_cache(maxsize=1)
 def get_settings(config_file: str | None = None) -> Settings:
-    raw_path = config_file or os.environ.get("APP_CONFIG_FILE", "config.toml")
-    config_path = Path(raw_path).expanduser().resolve()
+    config_path = resolved_config_path(config_file)
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")

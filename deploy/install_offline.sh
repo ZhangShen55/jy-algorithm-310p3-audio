@@ -167,9 +167,14 @@ for f in \
     [ -f "$f" ] && source "$f"
 done
 
-# 2) sherpa-onnx 自带的 .so（如有）
-if [ -d "${INSTALL_ROOT}/sherpa/lib" ]; then
-    export LD_LIBRARY_PATH="${INSTALL_ROOT}/sherpa/lib:${LD_LIBRARY_PATH:-}"
+# 2) sherpa-onnx 动态库（libonnxruntime 常在 _deps 下，不在 lib/）
+SHERPA_LIB="${INSTALL_ROOT}/sherpa/lib"
+ONNXRT_LIB="${INSTALL_ROOT}/sherpa/_deps/onnxruntime-src/lib"
+if [ -d "${SHERPA_LIB}" ] || [ -d "${ONNXRT_LIB}" ]; then
+    _lp=""
+    [ -d "${SHERPA_LIB}" ] && _lp="${SHERPA_LIB}"
+    [ -d "${ONNXRT_LIB}" ] && _lp="${_lp:+${_lp}:}${ONNXRT_LIB}"
+    export LD_LIBRARY_PATH="${_lp}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 # 3) conda-pack 环境：不走 conda activate，直接用 PATH

@@ -26,10 +26,11 @@ max_queue_size = 10
 
 [asr.paraformer]
 executable = "./bin/sherpa-onnx-vad-with-offline-asr"
+# 可用绝对路径；换机器时改成该机上 sherpa-onnx 的 CMake build 目录
 working_dir = "/root/workspaces/zhangs/sherpa-onnx/build"
 provider = "ascend"
 num_threads = 2
-# 与 build/model 下实际布局一致（常见为 vad 子目录；勿写不存在的 ./model/silero_vad.onnx）
+# 与 build/model 下实际布局一致（vad 子目录）
 silero_vad_model = "./model/vad/silero_vad.onnx"
 silero_vad_threshold = 0.45 
 silero_vad_min_silence_duration = 0.15

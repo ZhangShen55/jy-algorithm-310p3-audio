@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shlex
 import wave
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
-from app.core.config import ParaformerCliSettings, SenseVoiceCliSettings, Settings
+from app.core.config import ParaformerCliSettings, SenseVoiceCliSettings, Settings, resolved_config_dir
 from app.core.errors import ASRProcessingError, ConcurrencyLimitError
 from app.schemas.asr import AsrResponse, Segment
 
@@ -370,11 +371,13 @@ class ASRService:
             " ".join(shlex.quote(part) for part in command),
         )
 
+        env = self._subprocess_env_for_cli(working_dir)
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
         )
 
         try:
@@ -673,12 +676,15 @@ class ASRService:
 
         self._logger.debug("Running punctuation command: %s", " ".join(command))
 
+        cwd = self._resolve_working_dir(config.working_dir)
+        env = self._subprocess_env_for_cli(config.working_dir)
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=config.working_dir,
+                cwd=cwd,
+                env=env,
             )
             stdout_bytes, stderr_bytes = await process.communicate()
 
@@ -717,8 +723,43 @@ class ASRService:
     def _resolve_working_dir(working_dir: str | None) -> str | None:
         if not working_dir:
             return None
+        p = Path(working_dir).expanduser()
+        if p.is_absolute():
+            return str(p.resolve())
+        # 相对路径：相对 config.toml 所在目录（与 sherpa 工程并列时可用 ../sherpa-onnx/build）
+        return str((resolved_config_dir() / p).resolve())
 
-        return str(Path(working_dir).expanduser().resolve())
+    @staticmethod
+    def _cli_library_dirs(resolved_working_dir: str | None) -> list[Path]:
+        """sherpa-onnx 可执行文件依赖的 .so 常见位置（相对 CMake build 目录）。"""
+        if not resolved_working_dir:
+            return []
+        base = Path(resolved_working_dir)
+        dirs: list[Path] = []
+        for rel in (Path("lib"), Path("_deps/onnxruntime-src/lib")):
+            p = base / rel
+            if p.is_dir():
+                dirs.append(p)
+        deps = base / "_deps"
+        if deps.is_dir():
+            for child in sorted(deps.iterdir()):
+                cand = child / "lib"
+                if cand.is_dir() and (cand / "libonnxruntime.so").is_file() and cand not in dirs:
+                    dirs.append(cand)
+        return dirs
+
+    @staticmethod
+    def _subprocess_env_for_cli(working_dir: str | None) -> dict[str, str]:
+        """为 CLI 子进程补齐 LD_LIBRARY_PATH，避免 uvicorn 环境下找不到 libonnxruntime.so。"""
+        env = dict(os.environ)
+        cwd = ASRService._resolve_working_dir(working_dir)
+        extra_dirs = ASRService._cli_library_dirs(cwd)
+        if not extra_dirs:
+            return env
+        extra = ":".join(str(p) for p in extra_dirs)
+        existing = env.get("LD_LIBRARY_PATH", "").strip()
+        env["LD_LIBRARY_PATH"] = f"{extra}:{existing}" if existing else extra
+        return env
 
     @staticmethod
     def _tail_text(text: str, *, lines: int = 20) -> str:
