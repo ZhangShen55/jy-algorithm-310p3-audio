@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# seacraft —— Seacraft ASR 运维命令
+#
+# 用法：
+#   seacraft start|stop|restart|status
+#   seacraft logs           查看最近 200 行
+#   seacraft logs -f        实时跟随
+#   seacraft logs --since "10 min ago"
+#   seacraft health         调用 /healthz 做一次冒烟
+#   seacraft config         打印当前 config.toml
+#   seacraft edit-config    vi 编辑 config.toml（编辑后自动提示重启）
+#   seacraft version        打印服务版本
+# -----------------------------------------------------------------------------
+set -euo pipefail
+
+SERVICE="seacraft-asr.service"
+INSTALL_ROOT="/opt/seacraft"
+CONFIG_FILE="${INSTALL_ROOT}/app/config.toml"
+
+die() { printf '\033[1;31mERR\033[0m %s\n' "$*" >&2; exit 1; }
+
+_port() {
+    awk -F' *= *' '/^\[server\]/{s=1;next} /^\[/{s=0} s&&/^port/{gsub(/"/,"",$2);print $2;exit}' \
+        "${CONFIG_FILE}" 2>/dev/null || echo 8081
+}
+
+cmd="${1:-}"; shift || true
+
+case "${cmd}" in
+    start)
+        sudo systemctl start "${SERVICE}"
+        sudo systemctl status "${SERVICE}" --no-pager -l | head -20
+        ;;
+
+    stop)
+        sudo systemctl stop "${SERVICE}"
+        echo "stopped."
+        ;;
+
+    restart)
+        sudo systemctl restart "${SERVICE}"
+        sleep 1
+        sudo systemctl status "${SERVICE}" --no-pager -l | head -20
+        ;;
+
+    status)
+        sudo systemctl status "${SERVICE}" --no-pager -l
+        ;;
+
+    logs)
+        # 默认最近 200 行，额外参数透传给 journalctl
+        if [ "$#" -eq 0 ]; then
+            sudo journalctl -u "${SERVICE}" -n 200 --no-pager
+        else
+            sudo journalctl -u "${SERVICE}" "$@"
+        fi
+        ;;
+
+    health)
+        port="$(_port)"
+        url="http://127.0.0.1:${port}/healthz"
+        echo "GET ${url}"
+        if command -v curl >/dev/null; then
+            curl -fsS --max-time 3 "${url}" && echo
+        else
+            die "curl 未安装，无法做 health 检查"
+        fi
+        ;;
+
+    config)
+        [ -f "${CONFIG_FILE}" ] || die "${CONFIG_FILE} 不存在"
+        cat "${CONFIG_FILE}"
+        ;;
+
+    edit-config)
+        [ -f "${CONFIG_FILE}" ] || die "${CONFIG_FILE} 不存在"
+        sudo "${EDITOR:-vi}" "${CONFIG_FILE}"
+        echo
+        echo "修改完成，运行：  seacraft restart   让配置生效"
+        ;;
+
+    version)
+        awk -F' *= *' '/^\[app\]/{s=1;next} /^\[/{s=0} s&&/^version/{gsub(/"/,"",$2);print $2;exit}' \
+            "${CONFIG_FILE}" 2>/dev/null || echo "unknown"
+        ;;
+
+    ""|-h|--help|help)
+        sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+
+    *)
+        die "未知命令: ${cmd}（可用：start|stop|restart|status|logs|health|config|edit-config|version）"
+        ;;
+esac

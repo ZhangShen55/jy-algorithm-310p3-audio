@@ -11,3 +11,6 @@ tmp_audio/
 *.wav
 *.log
 /zimu/
+dist-build/
+*.tar
+*.gz

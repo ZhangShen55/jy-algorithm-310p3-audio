@@ -1,0 +1,35 @@
+[Unit]
+Description=Seacraft ASR Service (Ascend 310P3)
+Documentation=file:///opt/seacraft/README_OFFLINE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+WorkingDirectory=/opt/seacraft/app
+ExecStart=/opt/seacraft/app/launch.sh
+
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 让 journalctl 收所有 stdout/stderr
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=seacraft-asr
+
+# 进程级资源控制（按需调整）
+LimitNOFILE=65535
+# OOM 时让 systemd 负责重启而不是被 OOM killer 全干掉
+OOMScoreAdjust=-500
+
+# 优雅停止给 15 秒
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
