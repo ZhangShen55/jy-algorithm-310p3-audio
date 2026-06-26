@@ -54,3 +54,11 @@ command_timeout_seconds = 7200
 executable = "./bin/sherpa-onnx-offline-punctuation"
 working_dir = "/root/workspaces/zhangs/sherpa-onnx/build"
 ct_transformer = "./model/punc-0412/model.int8.onnx"
+
+[audio_metrics]
+# ffmpeg 可放在系统 PATH，也可配置为 conda 环境里的绝对路径
+ffmpeg_executable = "ffmpeg"
+decode_sample_rate = 16000
+analysis_frame_ms = 100
+db_floor = -60.0
+command_timeout_seconds = 300
