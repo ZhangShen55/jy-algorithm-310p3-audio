@@ -70,6 +70,14 @@ class PunctuationCliSettings(BaseModel):
     ct_transformer: str
 
 
+class AudioMetricsSettings(BaseModel):
+    ffmpeg_executable: str = "ffmpeg"
+    decode_sample_rate: int = 16000
+    analysis_frame_ms: int = 100
+    db_floor: float = -60.0
+    command_timeout_seconds: int = 300
+
+
 class AsrPipelineSettings(BaseModel):
     paraformer: ParaformerCliSettings
     sensevoice: SenseVoiceCliSettings
@@ -84,6 +92,7 @@ class Settings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     asr: AsrPipelineSettings
     punctuation_cli: PunctuationCliSettings
+    audio_metrics: AudioMetricsSettings = Field(default_factory=AudioMetricsSettings)
 
 
 def _load_toml_file(config_path: Path) -> dict:
